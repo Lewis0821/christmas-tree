@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no,maximum-scale=1">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>代码版圣诞树</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{
+    width:100%;height:100%;overflow:hidden;background:#000;
+    -webkit-tap-highlight-color:transparent;
+    -webkit-user-select:none;user-select:none;
+    touch-action:none;overscroll-behavior:none;
+  }
+  #c{display:block;width:100%;height:100%;touch-action:none}
+  #hint{
+    position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));
+    transform:translateX(-50%);
+    font:12px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    letter-spacing:.18em;color:#6f6f79;white-space:nowrap;
+    pointer-events:none;transition:opacity 1.2s ease;
+    text-shadow:0 0 6px #000,0 0 12px #000;
+  }
+  #hint.off{opacity:0}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">拖动旋转 · 轻点暂停</div>
+<script>
+(function () {
+'use strict';
+
+// ==================== 全局参数（与桌面版一致） ====================
+var TREE_POINTS   = 50000;   // 树更"毛茸茸"
+var GROUND_POINTS = 4000;
+var STAR_POINTS   = 1200;    // 空中小亮点，跟树/地面一起转
+var HEART_POINTS  = 1000;    // 树顶 3D 爱心的小光点
+var SNOW2D_POINTS = 14;      // 前景大雪花（原视频 10，手机上调多一点更明显）
+
+var CAM_DIST   = 13;         // 相机离原点的"前后"距离
+var CAM_HEIGHT = 6.0;
+var PITCH      = -0.25;      // 负角度 = 俯视
+var TREE_HEIGHT = 12.0;
+
+var AUTO_SPIN = 0.16;        // 自转角速度 rad/s
+var TAU = Math.PI * 2;
+
+// ==================== 粒子生成 ====================
+var xs, ys, zs, cr, cg, cb, N;
+var HEART_START;   // 爱心在数组里的起点（之后要单独做 billboard）
+var TREE_END;      // 树身结束位置（取景只用树身，星星和地面环不该参与）
+
+function genAll() {
+  xs = []; ys = []; zs = []; cr = []; cg = []; cb = [];
+
+  // ---- 圣诞树：70% 螺旋灯带 + 30% 蓬松填充 ----
+  var loops = 9;
+  var spiral_n = Math.floor(TREE_POINTS * 0.7);
+  var i, u, h, y, base_r, wave, t, angle, r, x, z, c;
+
+  for (i = 0; i < spiral_n; i++) {
+    u = Math.random();
+    h = Math.pow(u, 1.25);
+    y = TREE_HEIGHT * h + 0.2;
+
+    base_r = Math.pow(1 - h, 1.1) * 3.2;
+    wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+    base_r *= 1 + 0.65 * wave;
+
+    t = u * loops * TAU;
+    angle = t + (Math.random() * 0.44 - 0.22);
+    r = base_r * (0.85 + Math.random() * 0.23);
+
+    x = Math.cos(angle) * r;
+    z = Math.sin(angle) * r;
+
+    // 中段更亮（淡蓝色系）
+    var mid_boost = Math.max(0.15, 1.0 - Math.abs(h - 0.55) * 1.5);
+    var base_g = 190 + Math.floor(45 * mid_boost);
+
+    var R = Math.min(255, base_g - 55 + (Math.random() * 26 - 10) | 0);
+    var G = Math.min(255, base_g + (Math.random() * 26 - 10) | 0);
+    var B = 255;
+    // 点缀更亮的小灯（接近白色的淡蓝）
+    if (Math.random() < 0.08) {
+      R = 215 + Math.floor(Math.random() * 26);
+      G = 235 + Math.floor(Math.random() * 21);
+      B = 255;
+    }
+    xs.push(x); ys.push(y); zs.push(z); cr.push(R); cg.push(G); cb.push(B);
+  }
+
+  // 蓬松填充
+  var fill_n = TREE_POINTS - spiral_n;
+  for (i = 0; i < fill_n; i++) {
+    h = Math.pow(Math.random(), 1.9);
+    y = TREE_HEIGHT * h + 0.2 + (Math.random() * 0.16 - 0.08);
+
+    base_r = Math.pow(1 - h, 1.1) * 4.3;
+    wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+    base_r *= 1 + 0.65 * wave;
+
+    r = base_r * Math.sqrt(Math.random());
+    angle = Math.random() * TAU;
+
+    x = Math.cos(angle) * r + (Math.random() * 0.16 - 0.08);
+    z = Math.sin(angle) * r + (Math.random() * 0.16 - 0.08);
+
+    xs.push(x); ys.push(y); zs.push(z);
+    cr.push(125 + ((Math.random() * 61) | 0));
+    cg.push(190 + ((Math.random() * 51) | 0));
+    cb.push(255);
+  }
+
+  // ---- 地面光环（法阵盘子） ----
+  TREE_END = xs.length;
+  var rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+  for (i = 0; i < GROUND_POINTS; i++) {
+    var ring = rings[(Math.random() * rings.length) | 0];
+    r = ring + (Math.random() * 0.12 - 0.06);
+    var theta = Math.random() * TAU;
+    x = Math.cos(theta) * r;
+    z = Math.sin(theta) * r;
+    y = -0.25;
+
+    c = Math.random() < 0.15
+      ? 235 + ((Math.random() * 21) | 0)
+      : 190 + ((Math.random() * 46) | 0);
+
+    xs.push(x); ys.push(y); zs.push(z);
+    cr.push((c * 0.72) | 0); cg.push((c * 0.86) | 0); cb.push(255);
+  }
+
+  // ---- 空中 3D 小亮点 ----
+  for (i = 0; i < STAR_POINTS; i++) {
+    x = Math.random() * 36 - 18;
+    z = Math.random() * 36 - 18;
+    y = 3 + Math.random() * 15;
+    var base = 215 + ((Math.random() * 41) | 0);
+    xs.push(x); ys.push(y); zs.push(z);
+    cr.push((base * 0.72) | 0); cg.push((base * 0.88) | 0); cb.push(255);
+  }
+
+  // ---- 树顶 3D 爱心 ----
+  HEART_START = xs.length;
+  var scale = 0.9;
+  var top_y = TREE_HEIGHT + 0.05;
+  var made = 0;
+  while (made < HEART_POINTS) {
+    x = Math.random() * 2.6 - 1.3;
+    y = Math.random() * 2.8 - 1.4;
+
+    var f = Math.pow(x * x + y * y - 1.0, 3) - x * x * (y * y * y);
+    if (f <= 0) {
+      var wx = x * scale * 0.8;
+      var wy = top_y + (y + 1.0) * scale * 0.5;
+      var wz = Math.random() * 0.36 - 0.18;
+
+      var dist = Math.sqrt(x * x + y * y);
+      var factor = Math.max(0.35, 1.15 - 0.5 * dist);
+      var g = Math.floor(190 * factor + 45);
+      g = Math.max(170, Math.min(255, g));
+
+      xs.push(wx); ys.push(wy); zs.push(wz);
+      cr.push(140 + ((Math.random() * 46) | 0));
+      cg.push(g);
+      cb.push(255);
+      made++;
+    }
+  }
+
+  N = xs.length;
+  xs = Float32Array.from(xs);
+  ys = Float32Array.from(ys);
+  zs = Float32Array.from(zs);
+  cr = Uint8Array.from(cr);
+  cg = Uint8Array.from(cg);
+  cb = Uint8Array.from(cb);
+}
+
+// ==================== 画布与缓冲区 ====================
+var cvs = document.getElementById('c');
+var ctx = cvs.getContext('2d', { alpha: false });
+var pc = document.createElement('canvas');
+var pctx = pc.getContext('2d', { alpha: false });
+
+var W = 0, H = 0, RW = 0, RH = 0, CX = 0, CY = 0, FH = 1;
+var R, G, B, img, buf32;
+
+function resize() {
+  var dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = cvs.clientWidth;
+  H = cvs.clientHeight;
+  cvs.width = Math.round(W * dpr);
+  cvs.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // 粒子缓冲直接按物理像素来 —— 不再降分辨率，
+  // 否则点会被放大插值成软块，这就是画面"糊"的根源。
+  setBuffer(Math.round(W * dpr), Math.round(H * dpr));
+
+  fitContent();
+}
+
+// 允许运行时调整缓冲分辨率（低端机掉帧时自动降一档）
+function setBuffer(bw, bh) {
+  RW = bw;
+  RH = bh;
+  pc.width = RW;
+  pc.height = RH;
+
+  CX = RW * 0.5;
+  CY = RH * 0.5;
+  FH = 1;
+
+  R = new Uint8Array(RW * RH);
+  G = new Uint8Array(RW * RH);
+  B = new Uint8Array(RW * RH);
+  img = pctx.createImageData(RW, RH);
+  buf32 = new Uint32Array(img.data.buffer);
+
+  fitContent();
+}
+
+// 缓冲降档：帧率持续偏低时退到 0.75 / 0.6 倍物理分辨率
+var bufScale = 1;
+function degradeBuffer() {
+  if (bufScale <= 0.55) return false;
+  bufScale = bufScale > 0.9 ? 0.75 : 0.6;
+  var dpr = Math.min(window.devicePixelRatio || 1, 3);
+  setBuffer(Math.round(W * dpr * bufScale), Math.round(H * dpr * bufScale));
+  return true;
+}
+
+// 按屏幕长宽比自动取景：只量"树身 + 爱心"的包围盒，
+// 星星和地面环故意不参与，否则它们会把树挤成一小团。
+function fitContent() {
+  if (!xs || !N) return;
+
+  var bestW = -1, bestH = -1;
+  var topMin = 1e9, botMax = -1e9;
+
+  // 旋转会改变宽度，采样 12 个角度取最大
+  for (var a = 0; a < 12; a++) {
+    var ang = a * Math.PI / 6;
+    var ca = Math.cos(ang), sa = Math.sin(ang);
+    var cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+
+    var minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+
+    for (var i = 0; i < N; i++) {
+      // 只取树身（到 TREE_END）和爱心（HEART_START 之后）
+      if (i >= TREE_END && i < HEART_START) continue;
+
+      var x = xs[i], y = ys[i], z = zs[i];
+      var xz = x * ca - z * sa;
+      var zz = x * sa + z * ca;
+      var yp = y * cp - zz * sp - CAM_HEIGHT;
+      var zp = y * sp + zz * cp + CAM_DIST;
+      if (zp <= 0.5) continue;
+
+      var u = xz / zp;
+      var v = yp / zp;
+
+      if (u < minX) minX = u;
+      if (u > maxX) maxX = u;
+      if (v < minY) minY = v;
+      if (v > maxY) maxY = v;
+    }
+    var w = maxX - minX, hh = maxY - minY;
+    if (w > bestW) bestW = w;
+    if (hh > bestH) bestH = hh;
+    if (minY < topMin) topMin = minY;
+    if (maxY > botMax) botMax = maxY;
+  }
+
+  if (bestW <= 0 || bestH <= 0) { FH = RH * 0.63; return; }
+
+  // 竖屏：顶部留一条给文字；横屏：左侧留一条给文字
+  var portrait = RH > RW;
+  var reserveTop = portrait ? RH * 0.21 : 0;
+  var reserveLeft = portrait ? 0 : RW * 0.26;
+  var availH = RH - reserveTop;
+  var availW = RW - reserveLeft;
+
+  // 树身占可用区域的比例；地面光环会自然溢出画面边缘（原视频也是这样）
+  var padW = 0.97;
+  var padH = 0.94;
+  var fByW = (availW * padW) / bestW;
+  var fByH = (availH * padH) / bestH;
+  FH = Math.min(fByW, fByH);
+
+  // 让内容在"文字之外的可用区域"里居中
+  var midV = (topMin + botMax) * 0.5;
+  CY = reserveTop + availH * 0.5 + midV * FH;
+  CX = reserveLeft + availW * 0.5;
+}
+
+// ==================== 前景雪花 ====================
+var snow = [];
+function respawnFlake(f, initial) {
+  f.x = Math.random() * W;
+  f.y = initial ? Math.random() * H : -40 - Math.random() * 80;
+  f.r = 0.9 + Math.random() * 2.0;      // CSS 像素；再乘 dpr 才是物理像素
+  f.v = 26 + Math.random() * 26;
+  f.life = (H + 80 - f.y) / f.v;
+  f.max = f.life;
+}
+function initSnow() {
+  snow = [];
+  for (var i = 0; i < SNOW2D_POINTS; i++) {
+    var f = {};
+    respawnFlake(f, true);
+    snow.push(f);
+  }
+}
+
+// ==================== 渲染一帧 ====================
+var angle = 0, spinning = true, t = 0;
+
+function renderParticles() {
+  R.fill(0); G.fill(0); B.fill(0);
+
+  var ca = Math.cos(angle), sa = Math.sin(angle);
+  var cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+  var camH = CAM_HEIGHT;
+  var fk = FH;
+  var rw = RW, rh = RH;
+  var cx = CX, cy = CY;
+
+  for (var i = 0; i < N; i++) {
+    var x = xs[i], y = ys[i], z = zs[i];
+
+    var xz = x * ca - z * sa;
+    var zz = x * sa + z * ca;
+
+    var yp = y * cp - zz * sp;
+    var zp = y * sp + zz * cp + CAM_DIST;
+    yp -= camH;
+
+    if (zp <= 0.1) continue;
+
+    var f = fk / zp;
+    var sx = cx + xz * f;
+    var sy = cy - yp * f;
+
+    if (sx < 0 || sy < 0 || sx >= rw - 1 || sy >= rh - 1) continue;
+
+    // 远处压暗，形成深度感
+    var k = 1.32 - 0.028 * zp;
+    if (k > 1) k = 1; else if (k < 0.18) k = 0.18;
+
+    var ix = sx | 0, iy = sy | 0;
+    var p0 = iy * rw + ix;
+    var p1 = p0 + 1, p2 = p0 + rw, p3 = p2 + 1;
+
+    // 每颗粒子画成 2×2 物理像素的一小坨（用"取最大值"合成，密集处不会糊成白色）。
+    // 缓冲已经是物理分辨率，所以这 2×2 在屏幕上正好是 ~1 个 CSS 像素 —— 锐利。
+    var v = cr[i] * k;
+    if (v > R[p0]) R[p0] = v;
+    if (v > R[p1]) R[p1] = v;
+    if (v > R[p2]) R[p2] = v;
+    if (v > R[p3]) R[p3] = v;
+
+    v = cg[i] * k;
+    if (v > G[p0]) G[p0] = v;
+    if (v > G[p1]) G[p1] = v;
+    if (v > G[p2]) G[p2] = v;
+    if (v > G[p3]) G[p3] = v;
+
+    v = cb[i] * k;
+    if (v > B[p0]) B[p0] = v;
+    if (v > B[p1]) B[p1] = v;
+    if (v > B[p2]) B[p2] = v;
+    if (v > B[p3]) B[p3] = v;
+  }
+
+  var n = rw * rh;
+  for (var p = 0; p < n; p++) {
+    buf32[p] = 0xff000000 | (B[p] << 16) | (G[p] << 8) | R[p];
+  }
+  pctx.putImageData(img, 0, 0);
+}
+
+function drawSnow(dt) {
+  for (var i = 0; i < snow.length; i++) {
+    var f = snow[i];
+    f.y += f.v * dt;
+    f.life -= dt;
+    if (f.life <= 0 || f.y > H + 60) { respawnFlake(f, false); continue; }
+
+    var phase = f.life / f.max;
+    var a = phase > 0.3 ? 0.55 : 0.55 * (phase / 0.3);
+    // 柔和小点：中心实、外圈淡，避免一个个"白圆盘"糊在画面上
+    var g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r * 2.6);
+    g.addColorStop(0, 'rgba(240,247,255,' + a + ')');
+    g.addColorStop(0.45, 'rgba(215,235,255,' + (a * 0.45) + ')');
+    g.addColorStop(1, 'rgba(200,225,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.r * 2.6, 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawText() {
+  var portrait = H > W;
+  var size = Math.round(portrait ? W * 0.075 : H * 0.056);
+  var tx = Math.round(portrait ? W * 0.08 : W * 0.028);
+  var ty = Math.round(portrait ? H * 0.14 : H * 0.43);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#ebebeb';
+  ctx.font = 'italic ' + size + 'px Georgia,"Times New Roman",serif';
+  ctx.fillText('Merry Christmas', tx, ty);
+  ctx.fillText('647', tx, ty + Math.round(size * 1.15));
+}
+
+var last = 0;
+var fpsAcc = 0, fpsN = 0, degraded = false;
+
+function frame(now) {
+  var dt = Math.min(0.05, (now - last) / 1000 || 0.016);
+  last = now;
+  t += dt;
+
+  if (spinning) angle += AUTO_SPIN * dt;
+
+  renderParticles();
+
+  // 粒子层贴到屏幕：缓冲已是物理分辨率，这里 1:1 还原，不做拉伸
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(pc, 0, 0, W, H);
+
+  drawSnow(dt);
+  drawText();
+
+  // 低端机兜底：连续 3 秒低于 40fps 就把缓冲降一档（只降一次，别降太多）
+  if (!degraded) {
+    fpsAcc += dt; fpsN++;
+    if (fpsAcc >= 3) {
+      var fps = fpsN / fpsAcc;
+      fpsAcc = 0; fpsN = 0;
+      if (fps < 40) {
+        degraded = true;
+        degradeBuffer();
+      }
+    }
+  }
+
+  requestAnimationFrame(frame);
+}
+
+// ==================== 交互 ====================
+var dragging = false, lastX = 0, moved = 0;
+
+cvs.addEventListener('touchstart', function (e) {
+  if (e.touches.length !== 1) return;
+  dragging = true; moved = 0; lastX = e.touches[0].clientX;
+}, { passive: true });
+
+cvs.addEventListener('touchmove', function (e) {
+  if (!dragging || e.touches.length !== 1) return;
+  var x = e.touches[0].clientX;
+  var dx = x - lastX;
+  lastX = x;
+  moved += Math.abs(dx);
+  angle += dx * 0.010;
+  e.preventDefault();
+}, { passive: false });
+
+cvs.addEventListener('touchend', function () {
+  if (dragging && moved < 8) {          // 没怎么动 = 轻点 → 暂停/继续
+    spinning = !spinning;
+  }
+  dragging = false;
+  hideHint();
+}, { passive: true });
+
+// 桌面浏览器也能用
+cvs.addEventListener('mousedown', function (e) {
+  dragging = true; moved = 0; lastX = e.clientX;
+});
+window.addEventListener('mousemove', function (e) {
+  if (!dragging) return;
+  var dx = e.clientX - lastX;
+  lastX = e.clientX;
+  moved += Math.abs(dx);
+  angle += dx * 0.010;
+});
+window.addEventListener('mouseup', function () {
+  if (dragging && moved < 8) spinning = !spinning;
+  dragging = false;
+});
+
+var hint = document.getElementById('hint');
+var hintHidden = false;
+function hideHint() {
+  if (hintHidden) return;
+  hintHidden = true;
+  hint.classList.add('off');
+}
+setTimeout(hideHint, 6000);
+
+var rt;
+window.addEventListener('resize', function () {
+  clearTimeout(rt);
+  rt = setTimeout(function () {
+    bufScale = 1;       // 换屏幕尺寸后重新评估，别带着旧降档
+    degraded = false;
+    resize();
+    fitContent();       // 尺寸变了要重新量包围盒
+    initSnow();
+  }, 180);
+});
+
+// ==================== 启动 ====================
+genAll();              // 先生成粒子，resize 里的 fitContent 才能量包围盒
+resize();
+fitContent();
+initSnow();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
