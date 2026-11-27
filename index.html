@@ -414,6 +414,7 @@ uniform mat4 uProj;uniform mat4 uView;
 uniform float uFocal,uTime,uGrow,uR0,uShift,uShiftY,uAlpha,uTwinkle;
 ${ROT_HEAD}
 varying vec3 vCol;varying float vA;varying float vY;
+varying vec3 vNrm;
 void main(){
   vec3 p=aPos;
   p.xz=rotXZ(p.xz);
@@ -421,7 +422,10 @@ void main(){
   float nr=mix(uR0,rr,uGrow);
   p.xz*=(rr>0.0001)?(nr/rr):1.0;
   p.y*=uGrow;
-  vY=p.y;
+  vY=p.y;
+  float rl=max(0.0001,length(p.xz));
+  vNrm=vec3(p.x/rl*0.94,0.34,p.z/rl*0.94);
+
   vec4 mv=uView*vec4(p,1.0);
   vec4 cl=uProj*mv;
   cl.x+=uShift*cl.w;
@@ -434,6 +438,7 @@ void main(){
   vA=mix(1.0,clamp(0.24+tw*1.02,0.10,1.35),uTwinkle)*uAlpha;
 }`;
 const FS_PT=`precision mediump float;varying vec3 vCol;varying float vA;varying float vY;
+varying vec3 vNrm;
 uniform mat3 uHue;uniform vec3 uTint,uLift,uDark;uniform float uSat;
 vec3 grade(vec3 c){
   float l=dot(c,vec3(0.299,0.587,0.114));
@@ -448,7 +453,11 @@ void main(){
   float r=length(d)*2.0;
   if(r>1.0)discard;
   float a=pow(smoothstep(1.0,0.0,r),1.75);
-  gl_FragColor=vec4(grade(vCol)*(0.6+0.8*a),a*vA);
+  /* 明暗：朝向主光的粒子更亮，背光侧压暗，让树冠有体积 */
+  vec3 Ld=normalize(vec3(0.62,0.60,0.86));
+  float nl=dot(normalize(vNrm),Ld)*0.5+0.5;
+  float shade=0.34+0.92*pow(nl,1.30);
+  gl_FragColor=vec4(grade(vCol)*shade*(0.6+0.8*a),a*vA);
 }`;
 
 const VS_MS=`
@@ -487,15 +496,22 @@ vec3 grade(vec3 c){
 void main(){
   vec3 N=normalize(vN);
   vec3 V=normalize(uCam-vP);
-  if(dot(N,V)<0.0)N=-N;
   vec3 L=normalize(uLight);
   float d=max(dot(N,L),0.0);
   float f=max(dot(N,normalize(uFill)),0.0);
-  float rim=pow(1.0-max(dot(N,V),0.0),3.0);
+
+  /* 立体感：环境光遮蔽 + 轮廓边光 + 窄高光 + 天光地光分离 */
+  float ao=pow(clamp(0.5+0.5*dot(N,V),0.0,1.0),1.6);
+  float rim=pow(1.0-max(dot(N,V),0.0),2.0);
   vec3 base=grade(vCol);
-  vec3 col=base*(0.30+0.72*d+0.26*f)+base*rim*0.45*vS;
-  float spec=pow(max(dot(reflect(-L,N),V),0.0),46.0);
-  col+=vec3(1.0,0.94,0.84)*spec*0.8*vS;
+  vec3 col=base*(0.34+1.05*d+0.40*f)*mix(0.68,1.0,ao);
+  col+=base*rim*1.15*vS;
+  float spec=pow(max(dot(reflect(-L,N),V),0.0),72.0);
+  col+=vec3(1.0,0.96,0.90)*spec*1.85*vS;
+  float spec2=pow(max(dot(reflect(-L,N),V),0.0),14.0);
+  col+=base*spec2*0.42*vS;
+  float up=N.y*0.5+0.5;
+  col=mix(col*vec3(1.06,1.00,0.90),col*vec3(0.90,0.97,1.10),up);
   gl_FragColor=vec4(col,clamp(vA,0.0,1.0));
 }`;
 
@@ -718,10 +734,10 @@ const P_POST_PLAIN=program(VS_POST,FS_POST_PLAIN,['aPos']);
 const postQuad=staticBuf([-1,-1,3,-1,-1,3]);
 
 /* 离屏 FBO：3D 场景先画到纹理，再统一做后处理 */
-let fbo=null, fboTex=null, fboW=0, fboH=0;
+let fbo=null, fboTex=null, fboDepth=null, fboW=0, fboH=0;
 function ensureFBO(w,h){
   if(fbo && fboW===w && fboH===h) return;
-  if(fbo){ gl.deleteFramebuffer(fbo); gl.deleteTexture(fboTex); }
+  if(fbo){ gl.deleteFramebuffer(fbo); gl.deleteTexture(fboTex); gl.deleteRenderbuffer(fboDepth); }
   fboW=w; fboH=h;
   fboTex=gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D,fboTex);
@@ -730,9 +746,15 @@ function ensureFBO(w,h){
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  /* 深度附件：让近处的挂饰真正遮挡远处的树体 */
+  fboDepth=gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER,fboDepth);
+  gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT16,w,h);
+  gl.bindRenderbuffer(gl.RENDERBUFFER,null);
   fbo=gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,fboTex,0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,fboDepth);
   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
 }
 
@@ -1000,8 +1022,8 @@ function drawStarMesh(o,grow,alpha,rot){
   gl.uniform1f(P_MS.u.uShiftY,shiftY);
   gl.uniform1f(P_MS.u.uAlpha,alpha);
   gl.uniform1f(P_MS.u.uRot,rot);
-  gl.uniform3f(P_MS.u.uLight,0.55,0.72,0.78);
-  gl.uniform3f(P_MS.u.uFill,-0.72,0.06,0.55);
+  gl.uniform3f(P_MS.u.uLight,0.62,0.60,0.86);
+  gl.uniform3f(P_MS.u.uFill,-0.80,0.30,0.42);
   gl.uniform3f(P_MS.u.uCam,0,camY,camZ);
   if(P_MS.u.uLock) gl.uniform3fv(P_MS.u.uLock,[1,1,1]);
   if(P_MS.u.uLockAmt) gl.uniform1f(P_MS.u.uLockAmt,1.0);
@@ -1054,6 +1076,25 @@ const RINGP=particleSet(5200,i=>{
   const b=0.15+Math.random()*0.68;
   return {p:[Math.cos(a)*rr,y,Math.sin(a)*rr],c:[c[0]*b,c[1]*b,c[2]*b],s:0.0022+Math.random()*0.0080,d:Math.random()};
 });
+/* 地面接触阴影：树根处一圈暗色粒子，模拟软阴影 */
+const GROUND_SHADOW=(()=>{
+  const N=2600;
+  const pos=new Float32Array(N*3),col=new Float32Array(N*3),sz=new Float32Array(N),sd=new Float32Array(N);
+  for(let i=0;i<N;i++){
+    const a=Math.random()*TAU;
+    const rr=R0*rnd(0.15,1.55);
+    const y=-0.02+rnd(-0.01,0.03);
+    pos[i*3]=Math.cos(a)*rr; pos[i*3+1]=y; pos[i*3+2]=Math.sin(a)*rr;
+    /* 中心更暗、边缘透明 */
+    const k=1.0-Math.min(1,rr/(R0*1.55));
+    const v=0.004*(0.35+k*0.65);
+    col[i*3]=v*0.55; col[i*3+1]=v*0.62; col[i*3+2]=v*0.85;
+    sz[i]=rnd(0.028,0.070)*(0.5+k*0.6);
+    sd[i]=Math.random();
+  }
+  return {count:N,pos,col,sz,sd,pb:staticBuf(pos),cb:staticBuf(col),szb:staticBuf(sz),sdb:staticBuf(sd)};
+})();
+
 /* 垂挂灯串：一圈圈的竖向光点链 */
 const LIGHTSTRINGS=(()=>{
   const pts=[];
@@ -1153,6 +1194,20 @@ function spawnWish(cx,cy,cz,power,count){
   gl.bindBuffer(gl.ARRAY_BUFFER,wish.szb);gl.bufferData(gl.ARRAY_BUFFER,wish.sz,gl.STATIC_DRAW);
 }
 
+/* ---------- 地面接触阴影（屏幕空间柔光椭圆） ---------- */
+const VS_SHADOW=`attribute vec2 aPos;varying vec2 vUv;
+void main(){vUv=aPos*0.5+0.5;gl_Position=vec4(aPos,0.0,1.0);}`;
+const FS_SHADOW=`precision mediump float;varying vec2 vUv;
+uniform vec2 uCenter;uniform vec2 uRad;uniform float uI;
+void main(){
+  vec2 d=(vUv-uCenter)/uRad;
+  float r=length(d);
+  float a=1.0-smoothstep(0.0,1.0,r);
+  a=pow(a,1.7)*uI;
+  gl_FragColor=vec4(0.0,0.0,0.0,a);
+}`;
+const P_SHADOW=program(VS_SHADOW,FS_SHADOW,['aPos']);
+const shadowQuad=staticBuf([-1,-1,3,-1,-1,3]);
 const bgBuf=staticBuf([-1,-1,3,-1,-1,3]);
 const flareBuf=staticBuf([0,STAR_Y,0.06]);
 const flareWishBuf=dynBuf([0,-999,0]);
@@ -1639,8 +1694,8 @@ function drawMesh(o,grow,alpha,rot){
   gl.uniform1f(P_MS.u.uShiftY,shiftY);
   gl.uniform1f(P_MS.u.uAlpha,alpha);
   gl.uniform1f(P_MS.u.uRot,rot);
-  gl.uniform3f(P_MS.u.uLight,0.55,0.72,0.78);
-  gl.uniform3f(P_MS.u.uFill,-0.72,0.06,0.55);
+  gl.uniform3f(P_MS.u.uLight,0.62,0.60,0.86);
+  gl.uniform3f(P_MS.u.uFill,-0.80,0.30,0.42);
   gl.uniform3f(P_MS.u.uCam,0,camY,camZ);
   applyGrade(P_MS);
   gl.drawArrays(gl.TRIANGLES,0,o.count);
@@ -1655,8 +1710,8 @@ function drawDecorMesh(grow,alpha,rot){
   gl.uniform1f(P_MS.u.uShiftY,shiftY);
   gl.uniform1f(P_MS.u.uAlpha,alpha);
   gl.uniform1f(P_MS.u.uRot,rot);
-  gl.uniform3f(P_MS.u.uLight,0.55,0.72,0.78);
-  gl.uniform3f(P_MS.u.uFill,-0.72,0.06,0.55);
+  gl.uniform3f(P_MS.u.uLight,0.62,0.60,0.86);
+  gl.uniform3f(P_MS.u.uFill,-0.80,0.30,0.42);
   gl.uniform3f(P_MS.u.uCam,0,camY,camZ);
   /* 用户装饰保持自己选的颜色，不做主题旋转 */
   if(P_MS.u.uLockAmt) gl.uniform1f(P_MS.u.uLockAmt,1.0);
@@ -1743,9 +1798,13 @@ function frame(now){
   gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
   gl.viewport(0,0,canvas.width,canvas.height);
   gl.clearColor(0.004,0.003,0.010,1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.depthMask(true);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
 
   gl.disable(gl.BLEND);
+  /* 背景是全屏铺满的 quad，绝不能写深度，否则会挡住后面所有物体 */
+  gl.disable(gl.DEPTH_TEST);
+  gl.depthMask(false);
   gl.useProgram(P_BG.program);
   gl.bindBuffer(gl.ARRAY_BUFFER,bgBuf);
   gl.enableVertexAttribArray(P_BG.a.aPos);
@@ -1756,7 +1815,30 @@ function frame(now){
   gl.uniform3fv(P_BG.u.uGlow2,bgT.glow2);
   gl.drawArrays(gl.TRIANGLES,0,3);
 
-  /* 树体（普通 alpha 混合） */
+  /* 地面接触阴影：在树根处叠一层柔和椭圆暗影（屏幕空间，平滑无颗粒） */
+  {
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(P_SHADOW.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER,shadowQuad);
+    gl.enableVertexAttribArray(P_SHADOW.a.aPos);
+    gl.vertexAttribPointer(P_SHADOW.a.aPos,2,gl.FLOAT,false,0,0);
+    /* 树根中心投影到屏幕：世界 (0,0,0) → NDC */
+    const cx=0.5+shift*0.5, cy=0.5-shiftY*0.5;
+    gl.uniform2f(P_SHADOW.u.uCenter,cx,cy-0.005);
+    gl.uniform2f(P_SHADOW.u.uRad,0.135,0.045);
+    gl.uniform1f(P_SHADOW.u.uI,0.55*S.alpha);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+
+  /* 树体：深度测试 + 背面剔除，法线保持真实朝向，方向光才有立体感 */
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+  gl.depthMask(true);
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.BACK);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
   gl.useProgram(P_MS.program);
@@ -1770,6 +1852,11 @@ function frame(now){
     gl.useProgram(P_MS.program);
     drawDecorMesh(S.grow,S.alpha,S.rot);
   }
+
+  /* 粒子阶段：关闭深度测试与剔除——加色光晕本来就该透出来，否则树的霜感会消失 */
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+  gl.depthMask(false);
 
   /* 粒子（加色） */
   gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
@@ -1823,8 +1910,8 @@ function frame(now){
   gl.drawArrays(gl.POINTS,0,WISH_N);
 
   /* 后处理：质感风格 */
-  if(styleMode!==0 || styleAmt>0.002) drawPost();
-  else { gl.bindFramebuffer(gl.FRAMEBUFFER,null); }   /* 原画直接显示 */
+  /* 场景总是先渲染到 FBO，因此必须无条件回贴到屏幕，否则默认模式会是黑屏 */
+  drawPost();
 
   requestAnimationFrame(frame);
 }
@@ -1859,6 +1946,29 @@ uiTick();
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
