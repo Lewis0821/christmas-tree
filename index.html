@@ -161,6 +161,20 @@
   .decor-actions button:hover{background:rgba(255,255,255,.12);color:#fff}
   .decor-actions button.primary{background:rgba(150,190,240,.18);color:#cfe6ff}
   .decor-actions button.primary:hover{background:rgba(150,190,240,.30);color:#fff}
+  .style-slider{display:flex;align-items:center;gap:9px;margin:2px 0 10px}
+  .style-slider label{font-size:11px;letter-spacing:.08em;color:#a99ec2;flex:none}
+  .style-slider input[type=range]{
+    -webkit-appearance:none;appearance:none;flex:1;height:3px;border-radius:2px;
+    background:rgba(255,255,255,.16);outline:none;cursor:pointer;
+  }
+  .style-slider input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:13px;height:13px;border-radius:50%;
+    background:#dce9f6;box-shadow:0 0 8px rgba(180,220,255,.6);cursor:pointer;
+  }
+  .style-slider input[type=range]::-moz-range-thumb{
+    width:13px;height:13px;border:none;border-radius:50%;background:#dce9f6;cursor:pointer;
+  }
+  .style-slider span{font-size:11px;color:#8e84a8;width:38px;text-align:right;flex:none}
   .decor-hint{
     position:fixed;z-index:4;left:50%;transform:translateX(-50%);
     bottom:calc(clamp(20px,3.8vh,44px) + 52px);
@@ -231,6 +245,8 @@
   <span class="sep"></span>
   <button id="btnDecor">装饰</button>
   <span class="sep"></span>
+  <button id="btnStyle">质感</button>
+  <span class="sep"></span>
   <button id="btnFull">全屏欣赏</button>
 </div>
 
@@ -258,6 +274,24 @@
   <p class="palette-note" id="decorNote">点树上任意位置放置 · 链接会记住你的装饰</p>
 </div>
 
+<div class="palette" id="stylePanel" role="dialog" aria-label="质感">
+  <div class="palette-head">
+    <b>画面质感</b>
+    <button id="btnStyleClose" aria-label="关闭">×</button>
+  </div>
+  <div class="decor-kinds" id="styleKinds">
+    <button type="button" data-m="0" class="sel">原画</button>
+    <button type="button" data-m="1">漫画</button>
+    <button type="button" data-m="2">油画</button>
+  </div>
+  <div class="style-slider">
+    <label>强度</label>
+    <input id="styleAmt" type="range" min="0" max="1" step="0.01" value="1">
+    <span id="styleAmtVal">100%</span>
+  </div>
+  <p class="palette-note">漫画＝赛璐璐平涂＋描边＋网点；油画＝笔触拖扫＋厚涂＋画布纹理</p>
+</div>
+
 <script>
 "use strict";
 /* =====================================================================
@@ -267,6 +301,7 @@
 
 const QS=new URLSearchParams(location.search);
 const FIXED_T=QS.has('t')?parseFloat(QS.get('t')):null;
+const QS_STYLE=QS.has('style')?parseInt(QS.get('style'),10):null;
 if(FIXED_T!==null) document.documentElement.classList.add('still');
 
 const canvas=document.getElementById('gl');
@@ -494,6 +529,232 @@ const P_BG=program(VS_BG,FS_BG,['aPos']);
 const P_PT=program(VS_PT,FS_PT,['aPos','aCol','aSize','aSeed']);
 const P_MS=program(VS_MS,FS_MS,['aPos','aNrm','aCol','aAlpha','aShine']);
 const P_FL=program(VS_FL,FS_FL,['aPos']);
+/* ---------- 后处理：质感风格（漫画 / 油画） ---------- */
+const COMMON_FN=`
+float lum(vec3 c){return dot(c,vec3(0.299,0.587,0.114));}
+float hash2(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float vnoise(vec2 p){
+  vec2 i=floor(p),f=fract(p);
+  f=f*f*(3.0-2.0*f);
+  float a=hash2(i),b=hash2(i+vec2(1.0,0.0)),cc=hash2(i+vec2(0.0,1.0)),d=hash2(i+vec2(1.0,1.0));
+  return mix(mix(a,b,f.x),mix(cc,d,f.x),f.y);
+}
+float fbm(vec2 p){
+  float v=0.0,a=0.5;
+  for(int i=0;i<5;i++){v+=a*vnoise(p);p=p*2.03+vec2(1.7,9.2);a*=0.5;}
+  return v;
+}
+vec3 lift(vec3 c,float gain){
+  c=clamp(c*gain,0.0,1.0);
+  return pow(c,vec3(0.86));
+}
+`;
+
+const VS_POST=`attribute vec2 aPos;varying vec2 vUv;
+void main(){vUv=aPos*0.5+0.5;gl_Position=vec4(aPos,0.0,1.0);}`;
+
+/* 漫画 / 国漫上色 */
+const FS_POST_COMIC=`precision highp float;
+varying vec2 vUv;
+uniform sampler2D uTex;uniform vec2 uTexel;uniform float uAmt;
+${COMMON_FN}
+vec3 S(vec2 uv){return lift(texture2D(uTex,uv).rgb,2.45);}
+void main(){
+  float t=clamp(uAmt,0.0,1.0);
+  vec3 raw=texture2D(uTex,vUv).rgb;
+  vec3 base=S(vUv);
+
+  vec3 acc=vec3(0.0);float ws=0.0;
+  for(int i=-3;i<=3;i++){
+    for(int j=-3;j<=3;j++){
+      vec3 s=S(vUv+vec2(float(i),float(j))*uTexel*2.0);
+      float d=length(s-base);
+      float w=exp(-d*d*30.0);
+      acc+=s*w;ws+=w;
+    }
+  }
+  vec3 flatC=acc/max(ws,0.0001);
+
+  float l=lum(flatC);
+  /* 极暗处不分阶，直接保原色，避免夜空出现色块 */
+  float qMask=smoothstep(0.045,0.14,l);
+  float L=clamp(floor(l*4.5+0.5)/4.5,0.0,1.0);
+  L=mix(l,L,qMask);
+  vec3 chroma=clamp(flatC/max(l,0.05),0.0,2.4);
+  vec3 cell=chroma*L;
+  float g=lum(cell);
+  cell=mix(cell,mix(vec3(g),cell,1.85),0.82);
+  cell=mix(cell,vec3(0.055,0.075,0.150),smoothstep(0.14,0.01,l)*0.45);
+
+  float tl=lum(S(vUv+vec2(-1.0,-1.0)*uTexel*1.35));
+  float tt=lum(S(vUv+vec2( 0.0,-1.0)*uTexel*1.35));
+  float tr=lum(S(vUv+vec2( 1.0,-1.0)*uTexel*1.35));
+  float ml=lum(S(vUv+vec2(-1.0, 0.0)*uTexel*1.35));
+  float mr=lum(S(vUv+vec2( 1.0, 0.0)*uTexel*1.35));
+  float bl=lum(S(vUv+vec2(-1.0, 1.0)*uTexel*1.35));
+  float bb=lum(S(vUv+vec2( 0.0, 1.0)*uTexel*1.35));
+  float br=lum(S(vUv+vec2( 1.0, 1.0)*uTexel*1.35));
+  float gx=-tl-2.0*ml-bl+tr+2.0*mr+br;
+  float gy=-tl-2.0*tt-tr+bl+2.0*bb+br;
+  float edge=sqrt(gx*gx+gy*gy);
+  float line=smoothstep(0.20,0.52,edge);
+  line*=smoothstep(0.015,0.09,l);
+
+  vec2 px=gl_FragCoord.xy;
+  float ang=0.6;
+  vec2 rp=vec2(cos(ang)*px.x-sin(ang)*px.y,sin(ang)*px.x+cos(ang)*px.y);
+  float dd=length(fract(rp/5.2)-0.5);
+  float shade=smoothstep(0.36,0.12,l);
+  float dotR=mix(0.0,0.42,shade);
+  float ht=1.0-smoothstep(dotR-0.055,dotR+0.055,dd);
+  cell=mix(cell,cell*0.72,ht*shade*0.55);
+
+  vec3 outC=mix(cell,vec3(0.030,0.028,0.055),line*0.92);
+  outC+=(hash2(px)-0.5)*0.016;
+  vec2 q=vUv-0.5;
+  outC*=1.0-dot(q,q)*0.30;
+
+  /* 背景遮罩：夜空保持原样，只风格化主体 */
+  float mask=smoothstep(0.035,0.115,lum(raw));
+  outC=mix(raw,outC,mask);
+  gl_FragColor=vec4(clamp(mix(raw,outC,t),0.0,1.0),1.0);
+}`;
+
+/* 油画 */
+const FS_POST_OIL=`precision highp float;
+varying vec2 vUv;
+uniform sampler2D uTex;uniform vec2 uTexel;uniform float uAmt;
+${COMMON_FN}
+vec3 S(vec2 uv){
+  vec3 c=texture2D(uTex,uv).rgb;
+  c=clamp(c*1.22+vec3(0.014,0.012,0.010),0.0,1.0);
+  return pow(c,vec3(0.94));
+}
+vec3 stroke(vec2 uv,vec2 d,float len,float k){
+  vec3 acc=vec3(0.0);float ws=0.0;
+  for(int i=-7;i<=7;i++){
+    float f=float(i);
+    float w=exp(-f*f*k);
+    acc+=S(uv+d*uTexel*f*len)*w;
+    ws+=w;
+  }
+  return acc/ws;
+}
+vec3 kuw(vec2 uv,vec2 dir,float rad){
+  vec2 n=normalize(dir+vec2(0.0001,0.0001));
+  vec2 p=vec2(-n.y,n.x);
+  vec3 best=vec3(0.0);float bv=1e9;
+  for(int s=0;s<4;s++){
+    vec2 d;
+    if(s==0)d=n;else if(s==1)d=-n;else if(s==2)d=p;else d=-p;
+    vec3 sum=vec3(0.0),sq=vec3(0.0);
+    for(int i=-2;i<=2;i++){
+      for(int j=-2;j<=2;j++){
+        vec3 cc=S(uv+(d*float(i)+p*float(j))*uTexel*rad);
+        sum+=cc;sq+=cc*cc;
+      }
+    }
+    vec3 m=sum/25.0;
+    vec3 v=sq/25.0-m*m;
+    float vv=v.r+v.g+v.b;
+    if(vv<bv){bv=vv;best=m;}
+  }
+  return best;
+}
+void main(){
+  float t=clamp(uAmt,0.0,1.0);
+  vec3 raw=texture2D(uTex,vUv).rgb;
+
+  vec3 a=S(vUv+vec2(-2.0,-2.0)*uTexel);
+  vec3 b=S(vUv+vec2( 2.0,-2.0)*uTexel);
+  vec3 cc=S(vUv+vec2(-2.0, 2.0)*uTexel);
+  vec3 d=S(vUv+vec2( 2.0, 2.0)*uTexel);
+  float gx=(lum(b)+lum(d))-(lum(a)+lum(cc));
+  float gy=(lum(cc)+lum(d))-(lum(a)+lum(b));
+  vec2 dir=vec2(-gy,gx);
+  if(length(dir)<0.002) dir=vec2(1.0,0.42);
+
+  vec2 n1=normalize(dir);
+  vec2 n2=normalize(dir+vec2(0.55,-0.45));
+
+  vec3 kv=kuw(vUv,dir,2.0);
+  vec3 s1=stroke(vUv,n1,4.0,0.028);
+  vec3 s2=stroke(vUv,n2,1.8,0.060);
+  vec3 oil=mix(kv,s1,0.50);
+  oil=mix(oil,s2,0.26);
+
+  float th1=fbm(vUv*vec2(190.0,110.0));
+  float th2=fbm(vUv*vec2(58.0,34.0)+9.1);
+  oil*=0.72+0.56*th1;
+  oil+=vec3(0.042,0.020,-0.012)*(th2-0.5)*2.2;
+
+  float gg=lum(oil);
+  oil=mix(vec3(gg),oil,1.45);
+  oil=mix(oil,oil*vec3(1.12,1.00,0.84),0.75);
+  oil+=vec3(0.040,0.022,0.000)*smoothstep(0.15,0.75,1.0-gg)*0.9;
+
+  float warp=sin(vUv.x*2300.0)*0.5+0.5;
+  float weft=sin(vUv.y*2300.0)*0.5+0.5;
+  oil+=(warp*weft-0.25)*0.048;
+  oil+=(hash2(gl_FragCoord.xy*0.83)-0.5)*0.022;
+  float bristle=vnoise(vec2(vUv.x*620.0,vUv.y*95.0));
+  oil+=(bristle-0.5)*0.028;
+
+  vec2 q=vUv-0.5;
+  oil*=1.0-dot(q,q)*0.62;
+  oil+=vec3(0.048,0.024,0.004)*(1.0-length(q)*1.6);
+
+  float mask=smoothstep(0.028,0.090,lum(raw));
+  vec3 merged=mix(raw,oil,mask);
+  gl_FragColor=vec4(clamp(mix(raw,merged,t),0.0,1.0),1.0);
+}`;
+
+const FS_POST_PLAIN=`precision mediump float;varying vec2 vUv;uniform sampler2D uTex;
+void main(){gl_FragColor=vec4(texture2D(uTex,vUv).rgb,1.0);}`;
+
+const P_POST_COMIC=program(VS_POST,FS_POST_COMIC,['aPos']);
+const P_POST_OIL=program(VS_POST,FS_POST_OIL,['aPos']);
+const P_POST_PLAIN=program(VS_POST,FS_POST_PLAIN,['aPos']);
+const postQuad=staticBuf([-1,-1,3,-1,-1,3]);
+
+/* 离屏 FBO：3D 场景先画到纹理，再统一做后处理 */
+let fbo=null, fboTex=null, fboW=0, fboH=0;
+function ensureFBO(w,h){
+  if(fbo && fboW===w && fboH===h) return;
+  if(fbo){ gl.deleteFramebuffer(fbo); gl.deleteTexture(fboTex); }
+  fboW=w; fboH=h;
+  fboTex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,fboTex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  fbo=gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,fboTex,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+}
+
+/* 质感模式：0 原画 / 1 漫画 / 2 油画 */
+let styleMode=0, styleAmt=0, styleTarget=0;
+function drawPost(){
+  const P = styleMode===1?P_POST_COMIC : styleMode===2?P_POST_OIL : P_POST_PLAIN;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.disable(gl.BLEND);
+  gl.useProgram(P.program);
+  gl.bindBuffer(gl.ARRAY_BUFFER,postQuad);
+  gl.enableVertexAttribArray(P.a.aPos);
+  gl.vertexAttribPointer(P.a.aPos,2,gl.FLOAT,false,0,0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,fboTex);
+  gl.uniform1i(P.u.uTex,0);
+  if(P.u.uTexel) gl.uniform2f(P.u.uTexel,1/fboW,1/fboH);
+  if(P.u.uAmt) gl.uniform1f(P.u.uAmt,styleAmt);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+}
+
 
 /* ---------- 调色板：色相旋转（保留多色层次） ---------- */
 /* 每套主题 = 色相旋转角 + 轻微染色/饱和，不会把装饰压成单色 */
@@ -1045,9 +1306,10 @@ function togglePalette(force){
 btnPalette.addEventListener('click',e=>{ e.stopPropagation(); togglePalette(); });
 document.getElementById('btnPaletteClose').addEventListener('click',e=>{ e.stopPropagation(); togglePalette(false); });
 window.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){ togglePalette(false); toggleDecor(false); }
+  if(e.key==='Escape'){ togglePalette(false); toggleDecor(false); toggleStyle(false); }
   if(e.key==='p'||e.key==='P') togglePalette();
   if(e.key==='d'||e.key==='D') toggleDecor();
+  if(e.key==='s'||e.key==='S') toggleStyle();
   if(e.key>='1'&&e.key<='6') setTheme(parseInt(e.key,10)-1);
 });
 try{ const saved=parseInt(localStorage.getItem('xmas-theme')||'0',10); if(saved>0&&saved<THEMES.length) setTheme(saved); }catch(_){}
@@ -1250,6 +1512,43 @@ document.getElementById('btnCopy').addEventListener('click',e=>{
   }
 });
 
+/* ---------- 质感切换 ---------- */
+const stylePanel=document.getElementById('stylePanel');
+const styleKindsEl=document.getElementById('styleKinds');
+const btnStyle=document.getElementById('btnStyle');
+const styleAmtEl=document.getElementById('styleAmt');
+const styleAmtVal=document.getElementById('styleAmtVal');
+function setStyle(m,amt){
+  styleMode=m;
+  styleAmt=(amt!==undefined)?amt:parseFloat(styleAmtEl.value);
+  styleAmtEl.value=String(styleAmt);
+  styleAmtVal.textContent=Math.round(styleAmt*100)+'%';
+  [...styleKindsEl.children].forEach((b,i)=>b.classList.toggle('sel',i===m));
+  try{ localStorage.setItem('xmas-style',m+':'+styleAmt); }catch(_){}
+}
+function toggleStyle(force){
+  const on=force!==undefined?force:!stylePanel.classList.contains('show');
+  stylePanel.classList.toggle('show',on);
+  btnStyle.classList.toggle('on',on);
+  if(on){ togglePalette(false); toggleDecor(false); }
+}
+btnStyle.addEventListener('click',e=>{e.stopPropagation();toggleStyle();});
+document.getElementById('btnStyleClose').addEventListener('click',e=>{e.stopPropagation();toggleStyle(false);});
+[...styleKindsEl.children].forEach((b,i)=>{
+  b.addEventListener('click',e=>{e.stopPropagation();setStyle(i);});
+});
+styleAmtEl.addEventListener('input',e=>{
+  e.stopPropagation();
+  styleAmt=parseFloat(styleAmtEl.value);
+  styleAmtVal.textContent=Math.round(styleAmt*100)+'%';
+  try{ localStorage.setItem('xmas-style',styleMode+':'+styleAmt); }catch(_){}
+});
+styleAmtEl.addEventListener('click',e=>e.stopPropagation());
+try{
+  const sv=QS_STYLE!==null?(QS_STYLE+':1'):localStorage.getItem('xmas-style');
+  if(sv){ const [m,a]=sv.split(':'); setStyle(parseInt(m,10)||0, parseFloat(a)); }
+}catch(_){}
+
 /* ---------- 交互 ---------- */
 let snowOn=true,lastWish=-99,nextAutoWish=10.5;
 const dock=document.getElementById('dock'),tip=document.getElementById('tip');
@@ -1279,7 +1578,7 @@ document.getElementById('btnFull').addEventListener('click',e=>{
   else document.exitFullscreen?.();
 });
 window.addEventListener('pointerdown',e=>{
-  if(e.target.closest('.dock')||e.target.closest('.palette'))return;
+  if(e.target.closest('.dock')||e.target.closest('.palette')||e.target.closest('.style-slider'))return;
   if(decorMode){
     const p=pickTree(e.clientX,e.clientY);
     decorations.push({t:p.t, th:p.th, k:decorKind, c:decorColor});
@@ -1440,6 +1739,9 @@ function frame(now){
   const S=sceneState(t);
   if(FIXED_T===null) stepTheme(dt); else stepTheme(1);
 
+  ensureFBO(canvas.width,canvas.height);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.viewport(0,0,canvas.width,canvas.height);
   gl.clearColor(0.004,0.003,0.010,1);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
@@ -1520,6 +1822,10 @@ function frame(now){
   gl.bufferData(gl.ARRAY_BUFFER,wish.pos,gl.DYNAMIC_DRAW);
   gl.drawArrays(gl.POINTS,0,WISH_N);
 
+  /* 后处理：质感风格 */
+  if(styleMode!==0 || styleAmt>0.002) drawPost();
+  else { gl.bindFramebuffer(gl.FRAMEBUFFER,null); }   /* 原画直接显示 */
+
   requestAnimationFrame(frame);
 }
 
@@ -1553,6 +1859,8 @@ uiTick();
 </script>
 </body>
 </html>
+
+
 
 
 
